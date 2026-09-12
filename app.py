@@ -61,7 +61,8 @@ def fetch_jobs(keyword, location, limit=3):
 def suggest_keyword_from_profile(client, profile):
     """Derive a short job-search term straight from the resume, so the search
     actually changes when the resume does — instead of relying on whatever
-    was last typed into the keyword box."""
+    was last typed into the keyword box. Returns (term, error) — error is
+    None on success, or a short message so failures aren't hidden."""
     try:
         resp = client.models.generate_content(
             model=MODEL_NAME,
@@ -72,9 +73,22 @@ def suggest_keyword_from_profile(client, profile):
             ),
         )
         term = resp.text.strip().strip('"').split("\n")[0]
-        return term or "internship"
-    except Exception:
-        return "internship"
+        return (term or _fallback_keyword(profile)), None
+    except Exception as e:
+        return _fallback_keyword(profile), str(e)
+
+
+def _fallback_keyword(profile):
+    """Used only if the Gemini call itself fails. A crude keyword guess so
+    different resumes still don't all collapse onto the same search term."""
+    import re
+    hits = re.findall(
+        r"\b(Python|Java|React|SQL|JavaScript|C\+\+|Machine Learning|Data Science|"
+        r"Marketing|Finance|Design|Research|Robotics|Biology|Nursing|Sales)\b",
+        profile,
+        re.IGNORECASE,
+    )
+    return f"{hits[0]} intern" if hits else "internship"
 
 
 # 4. App UI Layout
@@ -119,8 +133,14 @@ with col2:
             effective_keyword = search_keyword.strip()
             if not effective_keyword:
                 with st.spinner("Reading the profile to figure out what to search for..."):
-                    effective_keyword = suggest_keyword_from_profile(client, student_profile)
-                st.caption(f"🔎 Auto-detected search term: **{effective_keyword}**")
+                    effective_keyword, kw_error = suggest_keyword_from_profile(client, student_profile)
+                if kw_error:
+                    st.warning(
+                        f"Keyword auto-detection call failed ({kw_error}) — using a "
+                        f"rough fallback guess instead: **{effective_keyword}**"
+                    )
+                else:
+                    st.caption(f"🔎 Auto-detected search term: **{effective_keyword}**")
 
             with st.spinner(f"Searching for '{effective_keyword}' roles..."):
                 jobs = fetch_jobs(effective_keyword, search_location)
