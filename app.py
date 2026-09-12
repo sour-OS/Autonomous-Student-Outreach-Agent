@@ -1,127 +1,202 @@
+import os
 import streamlit as st
 import requests
-from bs4 import BeautifulSoup
 from google import genai
 
 # 1. Page Configuration
 st.set_page_config(page_title="AI Student Matchmaker", page_icon="🎓", layout="wide")
 
 st.title("🎓 Autonomous Student Outreach Agent")
-st.caption("Instantly find live LinkedIn opportunities and draft hyper-personalized outreach.")
+st.caption("Find matching opportunities and draft hyper-personalized outreach — ready to copy and send.")
 
-# 2. Sidebar Configuration
+# 2. Server-side key — the PERSON RUNNING THIS APP sets this once, so visitors never
+# need their own API key. Two ways to set it (pick whichever fits your deploy target):
+#   a) Local / Codespaces: create .streamlit/secrets.toml with:
+#        GEMINI_API_KEY = "your-key-here"
+#      (add .streamlit/secrets.toml to .gitignore — never commit it)
+#   b) Streamlit Community Cloud: paste the same into the app's "Secrets" settings panel.
+# Falls back to an environment variable so `export GEMINI_API_KEY=...` also works.
+GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", os.environ.get("GEMINI_API_KEY", ""))
+MODEL_NAME = "gemini-3.6-flash"
+
+# 2b. Sidebar — informational only, no key entry required from visitors
 with st.sidebar:
-    st.header("Configuration")
-    gemini_key = st.text_input("Enter Gemini API Key", type="password")
-    st.markdown("[Get an API Key from Google AI Studio](https://google.com)")
-    st.divider()
-    st.info("💡 Tip: Set up your student profile on the right, then search for live jobs!")
+    st.header("About")
+    st.info(
+        "💡 Live LinkedIn scraping is blocked by their bot protection and isn't reliable "
+        "for a demo, so this app pulls from the free Remotive jobs API instead (falls back "
+        "to a sample role if that's unreachable too)."
+    )
+    if not GEMINI_API_KEY:
+        st.warning(
+            "No Gemini API key configured on the server yet — see the comment at the "
+            "top of app.py for how to add one via Streamlit secrets."
+        )
 
-# 3. Live LinkedIn Scraping Engine (No login required)
-def fetch_live_linkedin_jobs(keyword, location):
-    # Target LinkedIn's public guest job search endpoint
-    url = f"https://linkedin.com{keyword}&location={location}"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    }
-    
+# 3. Stable job-search engine (Remotive public API — no key, no scraping, no ToS issues)
+def fetch_jobs(keyword, location, limit=3):
     try:
-        response = requests.get(url, headers=headers, timeout=10)
-        if response.status_code != 200:
-            return []
-            
-        soup = BeautifulSoup(response.text, 'html.parser')
-        job_listings = []
-        
-        # Scrape basic details from the public list cards
-        cards = soup.find_all('div', class_='base-card')
-        for card in cards[:3]:  # Limit to top 3 for speed
-            try:
-                title_tag = card.find('h3', class_='base-search-card__title')
-                company_tag = card.find('h4', class_='base-search-card__subtitle')
-                link_tag = card.find('a', class_='base-card__full-link')
-                
-                title = title_tag.text.strip() if title_tag else "Unknown Role"
-                company = company_tag.text.strip() if company_tag else "Unknown Company"
-                link = link_tag['href'].split('?')[0] if link_tag else "#"
-                
-                job_listings.append({"title": title, "company": company, "link": link})
-            except Exception:
-                continue
-        return job_listings
+        resp = requests.get(
+            "https://remotive.com/api/remote-jobs",
+            params={"search": keyword, "limit": limit},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json().get("jobs", [])
+        jobs = []
+        for j in data[:limit]:
+            jobs.append(
+                {
+                    "title": j.get("title", "Unknown Role"),
+                    "company": j.get("company_name", "Unknown Company"),
+                    "link": j.get("url", "#"),
+                }
+            )
+        return jobs
     except Exception as e:
-        st.sidebar.error(f"Scraping error: {e}")
+        st.sidebar.warning(f"Jobs API unreachable ({e}); using a sample role instead.")
         return []
+
+
+def suggest_keyword_from_profile(client, profile):
+    """Derive a short job-search term straight from the resume, so the search
+    actually changes when the resume does — instead of relying on whatever
+    was last typed into the keyword box."""
+    try:
+        resp = client.models.generate_content(
+            model=MODEL_NAME,
+            contents=(
+                "Read this student profile and output ONLY a 2-4 word job title "
+                "or tech-stack search term that best fits them — no punctuation, "
+                "no explanation, just the term.\n\nPROFILE:\n" + profile
+            ),
+        )
+        term = resp.text.strip().strip('"').split("\n")[0]
+        return term or "internship"
+    except Exception:
+        return "internship"
+
 
 # 4. App UI Layout
 col1, col2 = st.columns([1, 1.2])
 
 with col1:
     st.subheader("📝 Step 1: Student Profile")
+    student_name = st.text_input("Student name (optional)", placeholder="Alex Rivera")
     student_profile = st.text_area(
-        "Paste Resume text, GitHub bio, or skills summary:",
+        "Paste resume text, GitHub bio, or skills summary:",
         height=220,
-        placeholder="e.g., Alex Rivera, CS Undergrad. Proficient in Python, SQL, and React. Built a deep learning model for crop classification during a recent hackathon..."
+        placeholder="e.g., CS undergrad. Proficient in Python, SQL, and React. Built a deep "
+        "learning model for crop classification during a recent hackathon...",
     )
-    
-    st.subheader("🔍 Step 2: Find Live Opportunities")
-    search_keyword = st.text_input("Job Keyword / Tech Stack", placeholder="Python Developer Intern")
-    search_location = st.text_input("Location", value="Canada")
+
+    st.subheader("🔍 Step 2: Find Opportunities")
+    search_keyword = st.text_input(
+        "Job Keyword / Tech Stack (optional)",
+        placeholder="Leave blank to auto-detect from the profile above",
+    )
+    search_location = st.text_input("Location (for display only)", value="Canada")
 
 with col2:
     st.subheader("🤖 Step 3: Match & Outreach Generation")
-    
-    if st.button("Find Jobs & Generate Cold Outreach", type="primary"):
-        if not gemini_key:
-            st.error("Please provide your Gemini API Key in the sidebar.")
-        elif not student_profile or not search_keyword:
-            st.error("Please fill out the Student Profile and provide a search keyword.")
+
+    if st.button("Find Jobs & Generate Outreach", type="primary"):
+        if not GEMINI_API_KEY:
+            st.error(
+                "This app isn't configured with an API key yet. If you're the "
+                "developer, add GEMINI_API_KEY to .streamlit/secrets.toml (see the "
+                "comment near the top of app.py)."
+            )
+        elif not student_profile:
+            st.error("Please fill out the Student Profile first.")
         else:
-            # Phase A: Pull live data
-            with st.spinner("Searching live LinkedIn feeds (bypassing restrictions)..."):
-                jobs = fetch_live_linkedin_jobs(search_keyword, search_location)
-            
+            try:
+                client = genai.Client(api_key=GEMINI_API_KEY)
+            except Exception as e:
+                st.error(f"Could not initialize Gemini client: {e}")
+                st.stop()
+
+            effective_keyword = search_keyword.strip()
+            if not effective_keyword:
+                with st.spinner("Reading the profile to figure out what to search for..."):
+                    effective_keyword = suggest_keyword_from_profile(client, student_profile)
+                st.caption(f"🔎 Auto-detected search term: **{effective_keyword}**")
+
+            with st.spinner(f"Searching for '{effective_keyword}' roles..."):
+                jobs = fetch_jobs(effective_keyword, search_location)
+
             if not jobs:
-                st.warning("Could not pull live listings directly from LinkedIn right now. Generating a tailored mock role based on your query instead so you can see the engine work!")
-                # Fallback dataset so the app never crashes or gives an empty screen during a pitch
-                jobs = [{"title": f"Junior {search_keyword}", "company": "Innovate Analytics", "link": "https://linkedin.com"}]
-            
-            # Phase B: Run match engine & output text
+                st.warning(
+                    "No live listings found — generating a tailored sample role instead "
+                    "so you can see the engine work."
+                )
+                jobs = [
+                    {
+                        "title": f"Junior {effective_keyword}",
+                        "company": "Innovate Analytics",
+                        "link": "#",
+                    }
+                ]
+
             for idx, job in enumerate(jobs):
-                st.markdown(f"### Match #{idx+1}: {job['title']} at **{job['company']}**")
-                st.caption(f"[View Posting on LinkedIn]({job['link']})")
-                
+                st.markdown(f"### Match #{idx + 1}: {job['title']} at **{job['company']}**")
+                if job["link"] != "#":
+                    st.caption(f"[View Posting]({job['link']})")
+
                 with st.spinner(f"Analyzing alignment for {job['title']}..."):
+                    prompt = f"""
+                    You are an elite, highly empathetic talent scout matching university students to roles.
+
+                    STUDENT DATA:
+                    Name: {student_name or "Not provided"}
+                    Profile: {student_profile}
+
+                    TARGET OPPORTUNITY:
+                    Role: {job['title']}
+                    Company: {job['company']}
+
+                    Respond in exactly this markdown layout:
+
+                    #### 📊 Match Analysis
+                    * **Match Score:** [Score]/100
+                    * **The Fit:** [one short, sharp sentence on why they match or what gap exists]
+
+                    #### ✉️ Dynamic Outreach Copy
+                    Write a short, engaging, 3-sentence message to the student explaining why they
+                    should apply to this specific role. Mention at least one specific piece of raw
+                    technical potential from their profile. Use their name if provided, otherwise
+                    write it so it works without a name. Sound human and fresh, not corporate.
+                    """
+
                     try:
-                        client = genai.Client(api_key=gemini_key)
-                        
-                        prompt = f"""
-                        You are an elite, highly empathetic talent scout matching university students to roles.
-                        
-                        STUDENT DATA:
-                        {student_profile}
-                        
-                        TARGET OPPORTUNITY:
-                        Role: {job['title']}
-                        Company: {job['company']}
-                        
-                        Please review the alignment and provide your analysis in this exact markdown layout:
-                        
-                        #### **📊 Match Analysis**
-                        * **Match Score:** [Score]/100
-                        * **The Fit:** [A single short, sharp punchy sentence stating exactly why they match or what gap exists]
-                        
-                        #### **✉️ Dynamic Outreach Copy**
-                        Write a short, engaging, 3-sentence email/message to the student explaining why they should apply to this specific role. Mention at least one specific piece of raw technical potential from their profile. Do NOT use placeholder tags like [Insert Name Here]; dynamically output their name if known, or write universally. Keep it sounding human and fresh, not corporate.
-                        """
-                        
                         response = client.models.generate_content(
-                            model='gemini-3.6-flash',
+                            model=MODEL_NAME,
                             contents=prompt,
                         )
-                        
-                        st.markdown(response.text)
+                        result_text = response.text
+                        st.markdown(result_text)
+
+                        # Extract just the outreach message for copy/send actions
+                        outreach_msg = result_text.split("Dynamic Outreach Copy")[-1]
+                        outreach_msg = outreach_msg.replace("#", "").strip()
+
+                        st.text_area(
+                            "Copy this message:",
+                            value=outreach_msg,
+                            height=100,
+                            key=f"copy_{idx}",
+                        )
+                        mailto = (
+                            f"mailto:?subject=Opportunity: {job['title']} at {job['company']}"
+                            f"&body={requests.utils.quote(outreach_msg)}"
+                        )
+                        st.link_button("✉️ Open in email draft", mailto)
+                        st.caption(
+                            "Manual send only — sending unsolicited automated DMs on LinkedIn/"
+                            "Instagram violates their terms and risks account bans, so this "
+                            "app prepares the message rather than sending it for you."
+                        )
                         st.divider()
-                        
+
                     except Exception as e:
                         st.error(f"LLM Error: {e}")
