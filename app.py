@@ -17,15 +17,15 @@ st.caption("Find matching opportunities and draft hyper-personalized outreach �
 #   b) Streamlit Community Cloud: paste the same into the app's "Secrets" settings panel.
 # Falls back to an environment variable so `export GEMINI_API_KEY=...` also works.
 GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", os.environ.get("GEMINI_API_KEY", ""))
-MODEL_NAME = "gemini-3.6-flash"
+MODEL_NAME = "gemini-3.5-flash-lite"
 
 # 2b. Sidebar — informational only, no key entry required from visitors
 with st.sidebar:
     st.header("About")
     st.info(
         "💡 Live LinkedIn scraping is blocked by their bot protection and isn't reliable "
-        "for a demo, so this app pulls from the free Remotive jobs API instead (falls back "
-        "to a sample role if that's unreachable too)."
+        "for a demo, so this app pulls from two free public job APIs (Remotive + RemoteOK) "
+        "instead — falls back to a sample role if both are unreachable."
     )
     if not GEMINI_API_KEY:
         st.warning(
@@ -33,29 +33,75 @@ with st.sidebar:
             "top of app.py for how to add one via Streamlit secrets."
         )
 
-# 3. Stable job-search engine (Remotive public API — no key, no scraping, no ToS issues)
-def fetch_jobs(keyword, location, limit=3):
-    try:
-        resp = requests.get(
-            "https://remotive.com/api/remote-jobs",
-            params={"search": keyword, "limit": limit},
-            timeout=10,
-        )
-        resp.raise_for_status()
-        data = resp.json().get("jobs", [])
-        jobs = []
-        for j in data[:limit]:
+# 3. Stable job-search engine — pulls from two free, keyless public sources and
+# merges them, since any single small remote-job board tends to keep surfacing
+# the same few postings for similar search terms.
+import random
+
+
+def _fetch_remotive(keyword, limit=8):
+    resp = requests.get(
+        "https://remotive.com/api/remote-jobs",
+        params={"search": keyword, "limit": limit},
+        timeout=10,
+    )
+    resp.raise_for_status()
+    data = resp.json().get("jobs", [])
+    return [
+        {
+            "title": j.get("title", "Unknown Role"),
+            "company": j.get("company_name", "Unknown Company"),
+            "link": j.get("url", "#"),
+        }
+        for j in data[:limit]
+    ]
+
+
+def _fetch_remoteok(keyword, limit=8):
+    resp = requests.get(
+        "https://remoteok.com/api",
+        headers={"User-Agent": "Mozilla/5.0 (compatible; StudentMatcherBot/1.0)"},
+        timeout=10,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    kw = keyword.lower()
+    jobs = []
+    for j in data[1:]:  # index 0 is metadata, not a listing
+        position = (j.get("position") or "").lower()
+        tags = " ".join(j.get("tags", []) or []).lower()
+        if kw in position or kw in tags:
             jobs.append(
                 {
-                    "title": j.get("title", "Unknown Role"),
-                    "company": j.get("company_name", "Unknown Company"),
+                    "title": j.get("position", "Unknown Role"),
+                    "company": j.get("company", "Unknown Company"),
                     "link": j.get("url", "#"),
                 }
             )
-        return jobs
-    except Exception as e:
-        st.sidebar.warning(f"Jobs API unreachable ({e}); using a sample role instead.")
-        return []
+        if len(jobs) >= limit:
+            break
+    return jobs
+
+
+def fetch_jobs(keyword, location, limit=1):
+    pool = []
+    for fetcher in (_fetch_remotive, _fetch_remoteok):
+        try:
+            pool.extend(fetcher(keyword))
+        except Exception as e:
+            st.sidebar.warning(f"{fetcher.__name__} unreachable ({e}); skipping that source.")
+
+    # Dedupe (same role sometimes appears on both boards)
+    seen = set()
+    unique = []
+    for j in pool:
+        key = (j["title"].strip().lower(), j["company"].strip().lower())
+        if key not in seen:
+            seen.add(key)
+            unique.append(j)
+
+    random.shuffle(unique)  # avoid always surfacing the same top few for similar terms
+    return unique[:limit]
 
 
 def suggest_keyword_from_profile(client, profile):
@@ -182,10 +228,15 @@ with col2:
                     * **The Fit:** [one short, sharp sentence on why they match or what gap exists]
 
                     #### ✉️ Dynamic Outreach Copy
-                    Write a short, engaging, 3-sentence message to the student explaining why they
-                    should apply to this specific role. Mention at least one specific piece of raw
-                    technical potential from their profile. Use their name if provided, otherwise
-                    write it so it works without a name. Sound human and fresh, not corporate.
+                    Write a short, 3-sentence COLD OUTREACH EMAIL in the STUDENT'S OWN VOICE,
+                    addressed TO the hiring team at {job['company']} — NOT a message written
+                    to the student, and NOT third-person advice about them. Write it exactly as
+                    the student would send it themselves: first person ("I'm reaching out
+                    because...", "I'd love the chance to..."), introducing who they are,
+                    referencing one specific, concrete piece of experience from their profile,
+                    and expressing interest in the {job['title']} role. End with a light call
+                    to action (e.g. asking for a quick chat). Sign off with their name if
+                    provided. Sound human and genuine, not corporate or generic.
                     """
 
                     try:
@@ -207,14 +258,14 @@ with col2:
                             key=f"copy_{idx}",
                         )
                         mailto = (
-                            f"mailto:?subject=Opportunity: {job['title']} at {job['company']}"
+                            f"mailto:?subject=Application: {job['title']} at {job['company']}"
                             f"&body={requests.utils.quote(outreach_msg)}"
                         )
-                        st.link_button("✉️ Open in email draft", mailto)
+                        st.link_button("✉️ Open as your application email", mailto)
                         st.caption(
-                            "Manual send only — sending unsolicited automated DMs on LinkedIn/"
-                            "Instagram violates their terms and risks account bans, so this "
-                            "app prepares the message rather than sending it for you."
+                            "This drafts the email as if YOU (the student) are sending it to "
+                            "the employer. Manual send only — automated DMs on LinkedIn/"
+                            "Instagram violate their terms and risk account bans."
                         )
                         st.divider()
 
