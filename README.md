@@ -1,4 +1,4 @@
-# 🎓 Autonomous Student Outreach Agent
+# Autonomous Student Outreach Agent
 
 Find a matching opportunity. Draft the outreach. Send it yourself. 
 
