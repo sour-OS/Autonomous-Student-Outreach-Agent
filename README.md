@@ -15,7 +15,7 @@ This project was built for Unbound Hackathon at Waterloo Tech Week.
 3. **Match & outreach** — the profile and the job are sent to Gemini, which returns a fit score out of 100, a one-line reason for the score, and a short cold-outreach email written as if the student is sending it themselves.
 4. **Send it** — the message is shown in a copyable box with a button that opens it as a pre-filled email draft. Nothing is sent automatically.
 
-> **Try it live:** [add your Streamlit Community Cloud link here once deployed]
+> **Try it live:** [link will come one day]
 >
 > This demo runs on a shared Gemini free-tier key, so if you hit a rate-limit error, it just means the daily quota is temporarily used up — try again later, or run it locally with your own key (see below).
 
