@@ -6,7 +6,7 @@ No scraping, no API key setup, no risky automation.
 
 A Streamlit app that takes a student's resume or profile, finds a real job listing that fits them, scores the match, and drafts a personalized cold-outreach email in the student's own voice — ready to copy or send.
 
-This project was built for Unbound Hackathon at Waterloo Tech Week.
+This project was built for Unbound Hackathon at Waterloo Tech Week and received First Place.
 
 ## How it works
 
